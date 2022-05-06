@@ -9,7 +9,6 @@ from dalle2_pytorch.tokenizer import SimpleTokenizer
 from dalle2_pytorch.optimizer import get_optimizer
 from torchvision.datasets.coco import CocoCaptions
 
-
 from config.default import *
 
 
@@ -30,49 +29,41 @@ def create_dataset():
     return transform, train_data
 
 
-
 def create_model():
-    # openai pretrained clip - defaults to ViT/B-32
     OpenAIClip = OpenAIClipAdapter()
 
-    unet = Unet(
-        dim = 128,
-        image_embed_dim = 512,
-        cond_dim = 128,
-        channels = 3,
-        dim_mults=(1, 2, 4, 8)
-    ).to(device)
+    prior_network = DiffusionPriorNetwork(
+        dim = 512,
+        depth = 6,
+        dim_head = 64,
+        heads = 8
+    )
 
-    # decoder, which contains the unet and clip
-
-    decoder = Decoder(
-        unet = unet,
+    diffusion_prior = DiffusionPrior(
+        net = prior_network,
         clip = OpenAIClip,
         timesteps = 100,
-        image_cond_drop_prob = 0.1,
-        text_cond_drop_prob = 0.5,
-        condition_on_text_encodings=True
+        cond_drop_prob = 0.2
     ).to(device)
 
-    if os.path.exists(decoder_save_path):
-        dec = torch.load(decoder_save_path)
-        decoder.load_state_dict(dec.state_dict())
+    if os.path.exists(diff_save_path):
+        dp = torch.load(diff_save_path)
+        diffusion_prior.load_state_dict(dp.state_dict())
 
-    return decoder
+    return diffusion_prior
 
 
+def train(diffusion_prior, train_data):
 
-def train(decoder, train_data):
     train_size = len(train_data)
     idx_list = range(0, train_size, batch_size)
 
     tokenizer = SimpleTokenizer()
-
-    opt = get_optimizer(decoder.parameters())
+    opt = get_optimizer(diffusion_prior.parameters())
     sched = ExponentialLR(opt, gamma=0.01)
 
     for curr_epoch in range(epoch):
-        print("Run training decoder ...")
+        print("Run training diffusion prior ...")
         print(f"Epoch {curr_epoch+1} / {epoch}")
         
         for batch_idx in tqdm(idx_list):
@@ -95,26 +86,23 @@ def train(decoder, train_data):
                     image_list.append(image)
                 
                 text_list.append(text)
-                
+
             text = torch.cat(text_list, dim=0).to(device)
             image = torch.cat(image_list, dim=0).to(device)
-
-            loss = decoder(image, text) # this can optionally be decoder(images, text) if you wish to condition on the text encodings as well, though it was hinted in the paper it didn't do much
+        
+            loss = diffusion_prior(text, image)
             opt.zero_grad()
             loss.backward()
             opt.step()
 
             if batch_idx != 0 and batch_idx % 100 == 0:
-                torch.save(decoder, decoder_save_path)
+                torch.save(diffusion_prior, diff_save_path)
                 sched.step()
-            
+
             if batch_idx % 1000 == 0:
                 print(f"loss: {loss.data}")
 
-    torch.save(decoder, decoder_save_path)
-
-
 if __name__ == "__main__":
     _, train_data = create_dataset()
-    decoder = create_model()
-    train(decoder, train_data)
+    diffusion_prior = create_model()
+    train(diffusion_prior, train_data)
